@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Mobile FPS Platformer</title>
+<style>
+  html, body { margin:0; height:100%; background:#0b1026; overflow:hidden; font-family:system-ui,sans-serif; color:#e9ecff; }
+  #overlay { position:fixed; top:0; left:0; right:0; padding:10px; display:flex; justify-content:space-between; align-items:center; pointer-events:none; }
+  #hud { font-size:14px; text-shadow:0 2px 8px rgba(0,0,0,0.5); }
+  #btnReset { pointer-events:auto; padding:6px 10px; border-radius:8px; border:1px solid #2b2f5c; background:#202859; color:#e9ecff; }
+  /* Touch controls */
+  .stick {
+    position:fixed; bottom:16px; width:120px; height:120px; border-radius:50%;
+    background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.18);
+    touch-action:none; backdrop-filter:blur(6px);
+  }
+  #stickLeft { left:16px; }
+  #stickRight { right:16px; }
+  .knob {
+    position:absolute; left:50%; top:50%; width:54px; height:54px; border-radius:50%;
+    transform:translate(-50%,-50%); background:rgba(97,225,255,0.35); border:1px solid rgba(97,225,255,0.6);
+  }
+  #btnJump {
+    position:fixed; right:18px; bottom:150px; width:72px; height:72px; border-radius:50%;
+    background:linear-gradient(180deg,#2d3a7a,#202859); border:1px solid #4450a8; color:#e9ecff;
+    box-shadow:0 8px 20px rgba(0,0,0,0.4); touch-action:none;
+  }
+  #help {
+    position:fixed; left:50%; bottom:10px; transform:translateX(-50%);
+    font-size:12px; opacity:0.85; text-align:center; pointer-events:none;
+  }
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="hud">Level 1 • Time: <span id="time">0.0</span>s • Jumps: <span id="jumps">0</span></div>
+  <button id="btnReset">Reset</button>
+</div>
+<div id="help">Mobile: left joystick to move, right to look, tap Jump. Desktop: WASD + mouse, Space to jump.</div>
+<div id="stickLeft" class="stick"><div class="knob"></div></div>
+<div id="stickRight" class="stick"><div class="knob"></div></div>
+<button id="btnJump">Jump</button>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+<script>
+(() => {
+  // Scene setup
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.Fog(0x0b1026, 25, 120);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  document.body.appendChild(renderer.domElement);
+
+  const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 500);
+  camera.position.set(0, 1.7, 0); // eye height
+
+  // Lighting
+  const hemi = new THREE.HemisphereLight(0x8a5cff, 0x0b1026, 0.7);
+  scene.add(hemi);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir.position.set(20, 30, 10);
+  dir.castShadow = true;
+  dir.shadow.mapSize.set(1024,1024);
+  scene.add(dir);
+
+  // Sky glow plane (subtle)
+  const skyGeo = new THREE.SphereGeometry(300, 32, 16);
+  const skyMat = new THREE.MeshBasicMaterial({ color: 0x101737, side: THREE.BackSide });
+  scene.add(new THREE.Mesh(skyGeo, skyMat));
+
+  // Materials
+  const matGround = new THREE.MeshStandardMaterial({ color: 0x1b2250, roughness:0.9, metalness:0.0 });
+  const matPlat = new THREE.MeshStandardMaterial({ color: 0x61e1ff, emissive:0x1a2e38, emissiveIntensity:0.35, roughness:0.6 });
+  const matGoal = new THREE.MeshStandardMaterial({ color: 0xffd46b, emissive:0x704f10, emissiveIntensity:0.6 });
+
+  // Ground
+  const ground = new THREE.Mesh(new THREE.BoxGeometry(80, 1, 80), matGround);
+  ground.position.set(0, -0.5, 0);
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // Platforms layout
+  const platforms = [];
+  function addPlatform(x,y,z,w=6,h=1,d=6,mat=matPlat){
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat);
+    m.position.set(x,y,z); m.castShadow = true; m.receiveShadow = true;
+    scene.add(m); platforms.push(m);
+  }
+  addPlatform(0, 1, -6);
+  addPlatform(5, 2, -14);
+  addPlatform(12, 3, -22, 7, 1, 4);
+  addPlatform(18, 5, -30, 5, 1, 5);
+  addPlatform(24, 7, -38, 4, 1, 4);
+  // Moving platform
+  const moving = new THREE.Mesh(new THREE.BoxGeometry(6,1,6), matPlat);
+  moving.position.set(30, 9, -46); moving.castShadow = true; scene.add(moving); platforms.push(moving);
+
+  // Goal
+  const goal = new THREE.Mesh(new THREE.CylinderGeometry(0, 2, 4, 32), matGoal);
+  goal.position.set(34, 10, -52); goal.rotation.y = Math.PI / 6; goal.castShadow = true; scene.add(goal);
+
+  // Player physics (simple)
+  const player = {
+    pos: new THREE.Vector3(0, 1.7, 2),
+    vel: new THREE.Vector3(0, 0, 0),
+    yaw: 0, pitch: 0,
+    speed: 6.0, // m/s
+    jumpVel: 5.5,
+    grounded: false
+  };
+
+  // Controls state
+  const keys = { w:false, a:false, s:false, d:false, space:false };
+  let touchMove = { x:0, y:0 }; // -1..1
+  let touchLook = { x:0, y:0 }; // -1..1
+  let jumps = 0;
+  const timeEl = document.getElementById("time");
+  const jumpsEl = document.getElementById("jumps");
+
+  // Desktop input
+  window.addEventListener("keydown", e => {
+    const k = e.key.toLowerCase();
+    if(k === "w") keys.w = true;
+    if(k === "a") keys.a = true;
+    if(k === "s") keys.s = true;
+    if(k === "d") keys.d = true;
+    if(k === " ") keys.space = true;
+  });
+  window.addEventListener("keyup", e => {
+    const k = e.key.toLowerCase();
+    if(k === "w") keys.w = false;
+    if(k === "a") keys.a = false;
+    if(k === "s") keys.s = false;
+    if(k === "d") keys.d = false;
+    if(k === " ") keys.space = false;
+  });
+
+  // Pointer look (desktop)
+  let pointerLocked = false;
+  renderer.domElement.addEventListener("click", () => {
+    if (renderer.domElement.requestPointerLock) renderer.domElement.requestPointerLock();
+  });
+  document.addEventListener("pointerlockchange", () => { pointerLocked = !!document.pointerLockElement; });
+  document.addEventListener("mousemove", (e) => {
+    if (!pointerLocked) return;
+    const sensitivity = 0.0025;
+    player.yaw -= e.movementX * sensitivity;
+    player.pitch -= e.movementY * sensitivity;
+    player.pitch = Math.max(-Math.PI/2 + 0.05, Math.min(Math.PI/2 - 0.05, player.pitch));
+  });
+
+  // Touch joysticks
+  function setupStick(el, onMove){
+    const knob = el.querySelector(".knob");
+    let active = false, sx = 0, sy = 0;
+    function setKnob(dx, dy){
+      const r = 50; // radius
+      const mag = Math.hypot(dx, dy);
+      const cl = mag > r ? r/mag : 1;
+      const nx = dx * cl, ny = dy * cl;
+      knob.style.transform = `translate(${nx}px, ${ny}px) translate(-50%,-50%)`;
+      onMove(nx/r, ny/r);
+    }
+    el.addEventListener("touchstart", e => {
+      active = true;
+      const t = e.touches[0];
+      const rect = el.getBoundingClientRect();
+      sx = t.clientX - (rect.left + rect.width/2);
+      sy = t.clientY - (rect.top + rect.height/2);
+      setKnob(sx, sy);
+    }, {passive:false});
+    el.addEventListener("touchmove", e => {
+      if(!active) return;
+      const t = e.touches[0];
+      const rect = el.getBoundingClientRect();
+      const dx = t.clientX - (rect.left + rect.width/2);
+      const dy = t.clientY - (rect.top + rect.height/2);
+      setKnob(dx, dy);
+      e.preventDefault();
+    }, {passive:false});
+    el.addEventListener("touchend", () => {
+      active = false; knob.style.transform = `translate(-50%,-50%)`; onMove(0,0);
+    });
+    el.addEventListener("touchcancel", () => {
+      active = false; knob.style.transform = `translate(-50%,-50%)`; onMove(0,0);
+    });
+  }
+  setupStick(document.getElementById("stickLeft"), (x,y) => { touchMove.x = x; touchMove.y = y; });
+  setupStick(document.getElementById("stickRight"), (x,y) => { touchLook.x = x; touchLook.y = y; });
+
+  // Jump button
+  const btnJump = document.getElementById("btnJump");
+  btnJump.addEventListener("touchstart", (e) => { e.preventDefault(); attemptJump(); }, {passive:false});
+  btnJump.addEventListener("click", attemptJump);
+  function attemptJump(){
+    if(player.grounded){
+      player.vel.y = player.jumpVel;
+      player.grounded = false;
+      jumps++;
+      jumpsEl.textContent = jumps;
+    }
+  }
+
+  // Mobile look via right stick
+  function applyTouchLook(dt){
+    const yawSpeed = 2.8; // rad/s at full deflection
+    const pitchSpeed = 2.0;
+    player.yaw -= touchLook.x * yawSpeed * dt;
+    player.pitch -= touchLook.y * pitchSpeed * dt;
+    player.pitch = Math.max(-Math.PI/2 + 0.05, Math.min(Math.PI/2 - 0.05, player.pitch));
+  }
+
+  // Movement
+  function getMoveVector(){
+    // Combine keyboard WASD and left-stick (touchMove)
+    let forward = (keys.w?1:0) + (-touchMove.y); // stick up reduces y
+    let strafe  = (keys.d?1:0) - (keys.a?1:0) + touchMove.x;
+    // Normalize to prevent faster diagonal
+    const len = Math.hypot(strafe, forward);
+    if(len > 1){ strafe /= len; forward /= len; }
+    return { forward, strafe };
+  }
+
+  // Simple collision: platforms and ground as AABBs
+  function resolveCollisions(pos, prevPos){
+    // Ground
+    if(pos.y < 1.0){ pos.y = 1.0; player.vel.y = 0; player.grounded = true; }
+    // Platforms
+    const boxes = platforms.concat([ground, moving]).map(m => {
+      m.geometry.computeBoundingBox();
+      const bb = m.geometry.boundingBox.clone();
+      bb.min.add(m.position); bb.max.add(m.position);
+      return bb;
+    });
+    let onTop = false;
+    for(const bb of boxes){
+      // Check if above platform and within footprint
+      const withinX = pos.x > bb.min.x - 2 && pos.x < bb.max.x + 2;
+      const withinZ = pos.z > bb.min.z - 2 && pos.z < bb.max.z + 2;
+      const topY = bb.max.y + 0.7; // small cushion
+      if(withinX && withinZ){
+        if(prevPos.y >= topY && pos.y < topY){
+          pos.y = topY; player.vel.y = 0; onTop = true;
+        }
+      }
+    }
+    if(onTop){ player.grounded = true; }
+  }
+
+  // Timer
+  let startTime = performance.now();
+
+  // Resize
+  window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // Loop
+  function loop(now){
+    const dt = Math.min(0.033, (now - (loop.last || now)) / 1000);
+    loop.last = now;
+
+    // Move moving platform
+    moving.position.x = 30 + Math.sin(now * 0.0015) * 6;
+
+    // Update orientation
+    applyTouchLook(dt);
+    camera.rotation.set(player.pitch, player.yaw, 0);
+
+    // Desired move in camera space
+    const { forward, strafe } = getMoveVector();
+    const cos = Math.cos(player.yaw), sin = Math.sin(player.yaw);
+    const dx = (strafe * cos + forward * sin) * player.speed * dt;
+    const dz = (strafe * -sin + forward * cos) * player.speed * dt;
+
+    player.pos.x += dx;
+    player.pos.z += dz;
+
+    // Gravity
+    player.vel.y -= 9.8 * dt;
+    player.pos.y += player.vel.y * dt;
+    const prev = player.pos.clone();
+
+    // Collisions
+    const before = prev.clone();
+    resolveCollisions(player.pos, before);
+
+    // Camera follows
+    camera.position.copy(player.pos);
+
+    // Win check
+    const distGoal = camera.position.distanceTo(goal.position);
+    if(distGoal < 3){
+      // Reset level gently
+      startTime = now;
+      jumps = 0; jumpsEl.textContent = jumps;
+      player.pos.set(0, 1.7, 2);
+      player.vel.set(0, 0, 0);
+      player.yaw = 0; player.pitch = 0;
+    }
+
+    // HUD
+    timeEl.textContent = ((now - startTime)/1000).toFixed(1);
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // Reset button
+  document.getElementById("btnReset").addEventListener("click", () => {
+    jumps = 0; jumpsEl.textContent = jumps;
+    startTime = performance.now();
+    player.pos.set(0, 1.7, 2);
+    player.vel.set(0, 0, 0);
+    player.yaw = 0; player.pitch = 0;
+  });
+})();
+</script>
+</body>
+</html>
